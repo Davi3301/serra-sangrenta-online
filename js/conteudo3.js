@@ -5,7 +5,7 @@
    o Planalto Gelado (leste) e a Mata Funda (sul), com os Selvagens, as
    Cavernas do Eco e o avião que caiu na noite do Tremor.
    ========================================================================== */
-VERSION = '3.9';
+VERSION = '3.9.1';
 
 /* ----------------------------- criaturas ----------------------------- */
 Object.assign(ENEMIES, {

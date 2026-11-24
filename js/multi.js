@@ -17,6 +17,38 @@ const MP_PREFIX = 'serrasangrenta-v3-', MP_CHAR = 'serra_mp_personagem', MP_SLOT
 const MP_URL = 'https://davi3301.github.io/serra-sangrenta-online/', mpLink = () => MP_URL + '?sala=' + MP.code;
 const MP_PROTO = 3, mpCompat = m => m.proto === MP_PROTO || (!m.proto && /^3\./.test(String(m.ver || '')));
 const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }, { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }] };
+/* ---------------------------- segurança ----------------------------
+   Nada que chega de outro jogador vira HTML sem passar por mpEsc, e o anfitrião confere tudo o que
+   os convidados mandam (dano, itens, mudanças no mundo) antes de aceitar: limites de valor, de
+   distância do jogador e de quantidade por segundo. */
+const mpEsc = s => String(s == null ? '' : s).replace(/[&<>"'`]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' })[c]);
+const mpName = n => String(n == null ? '' : n).replace(/[\u0000-\u001f<>&"'`\\]/g, '').trim().slice(0, 16) || 'Amigo';
+const mpNum = (v, lo, hi, d) => { v = +v; return isFinite(v) ? Math.max(lo, Math.min(hi, v)) : (d === undefined ? lo : d); };
+const mpItem = id => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id) ? id : '';
+function mpLook(l) { const o = {}; if (l && typeof l === 'object') for (const k of Object.keys(l).slice(0, 16)) { const v = l[k]; if (!/^[a-zA-Z_]{1,16}$/.test(k)) continue; if (typeof v === 'string' && v.length <= 24 && /^[#\w\s.,()%-]*$/.test(v)) o[k] = v; else if (typeof v === 'number' && isFinite(v)) o[k] = v; else if (typeof v === 'boolean') o[k] = v; } return o; }
+const mpNear = (p, x, y, r) => !!p && isFinite(x) && isFinite(y) && Math.hypot((p.tx !== undefined ? p.tx : p.x) - x, (p.ty !== undefined ? p.ty : p.y) - y) <= r;
+function mpRate(p, k, max) { const now = performance.now(), b = p._rl || (p._rl = {}), c = b[k] || (b[k] = { t: now, n: 0 }); if (now - c.t > 1000) { c.t = now; c.n = 0; } return ++c.n <= max; }
+function mpInv(v) { if (!Array.isArray(v)) return null; const out = []; for (const s of v.slice(0, 60)) { if (!s) continue; const id = mpItem(s.id); if (!id) continue; const o = { id, n: Math.round(mpNum(s.n, 1, 999, 1)) }; if (s.dur !== undefined) o.dur = mpNum(s.dur, 0, 100000); out.push(o); } return out; }
+// mudanças no mundo vindas de um convidado: só perto dele, só coisas que existem, no máximo 80 por mensagem
+function mpCleanDiff(d, p) {
+  if (!d || typeof d !== 'object' || !p) return null; const R = 700, out = {}; let n = 0; const ok = (x, y) => n++ < 80 && mpNear(p, x, y, R), keys = o => o && typeof o === 'object' ? Object.keys(o) : [], arr = a => Array.isArray(a) ? a.slice(0, 120) : [];
+  if (Array.isArray(d.dead)) { const add = {}; for (const i of keys(d.dead[0])) { const o = W.objs[i]; if (o && ok(o.x, o.y)) add[i] = mpNum(d.dead[0][i], 0, 1e9); } out.dead = [add, []]; }
+  if (Array.isArray(d.looted)) { const add = {}; for (const i of keys(d.looted[0])) { const o = W.objs[i]; if (o && ok(o.x, o.y)) add[i] = 1; } out.looted = [add, []]; }
+  if (Array.isArray(d.sealed)) { const add = {}; for (const i of keys(d.sealed[0])) { const f = W.fissures[i]; if (f && ok(f.x, f.y)) add[i] = 1; } out.sealed = [add, []]; }
+  if (Array.isArray(d.builds)) {
+    const add = {}, rem = [], at = k => { const m = /^(\d{1,4}),(\d{1,4})$/.exec(k); return m ? [(+m[1] + .5) * TILE, (+m[2] + .5) * TILE] : null; };
+    for (const k of keys(d.builds[0])) { const b = d.builds[0][k], pc = b && BUILDS.find(q => q.id === b.id), xy = at(k); if (pc && xy && ok(xy[0], xy[1])) add[k] = { id: pc.id, hp: mpNum(b.hp, 0, pc.hp || 1000) }; }
+    for (const k of arr(d.builds[1])) { const xy = at(String(k)); if (xy && ok(xy[0], xy[1])) rem.push(String(k)); }
+    out.builds = [add, rem];
+  }
+  if (Array.isArray(d.placed)) {
+    const add = [], rem = [];
+    for (const r of arr(d.placed[0])) { if (!Array.isArray(r)) continue; const t = mpItem(r[0]); if (!t || ITEMS[t].t !== 'place' || !OBJ[t]) continue; const x = mpNum(r[1], 0, WORLD_W), y = mpNum(r[2], 0, WORLD_H); if (!ok(x, y)) continue; add.push([t, Math.round(x), Math.round(y), mpInv(r[3]), r[4] === null || r[4] === undefined ? null : mpNum(r[4], 0, 10)]); }
+    for (const k of arr(d.placed[1])) { const m = /^(\w{1,30})@(-?\d{1,6}),(-?\d{1,6})$/.exec(String(k)); if (m && ok(+m[2], +m[3])) rem.push(String(k)); }
+    out.placed = [add, rem];
+  }
+  return out;
+}
 const isHost = () => MP.role === 'host', isClient = () => MP.role === 'client', inMP = () => !!MP.role && G.state !== 'title';
 const SHIRTS = ['#8a3a34', '#3a5a7a', '#4a6a3a', '#7a5a2a', '#6a3a6a', '#2a6a6a'];
 
@@ -44,7 +76,7 @@ function mpLobby(msg) {
         <input id="mp-code" class="search" maxlength="5" placeholder="CÓDIGO" value="${MP.invite || ''}" style="text-transform:uppercase;letter-spacing:6px;font-size:20px;text-align:center;width:100%;box-sizing:border-box">
         <button class="btn" data-a="mpjoin" style="width:100%;margin-top:8px">Entrar</button></div>
     </div>
-    <p id="mp-msg" class="hint" style="min-height:18px;color:var(--gold)">${msg || ''}</p>
+    <p id="mp-msg" class="hint" style="min-height:18px;color:var(--gold)">${mpEsc(msg || '')}</p>
     <button class="btn sec" data-a="mpback">Voltar</button>`);
 }
 function mpWaiting(html) { $('title').innerHTML = lobbyHTML(html + `<p id="mp-msg" class="hint" style="min-height:18px;color:var(--gold)"></p><button class="btn sec" data-a="mpcancel">Cancelar</button>`); }
@@ -75,7 +107,7 @@ async function mpHost(load) {
   peer.on('error', err => { if (err.type === 'unavailable-id') { peer.destroy(); return mpHost(load); } if (G.state === 'title') mpLobby('Erro na conexão: ' + (err.type || err.message)); else toast('Conexão: ' + (err.type || err.message), 'u_warn'); });
   peer.on('connection', conn => {
     conn.on('open', () => { if (Object.keys(MP.conns).length >= MP.max - 1) { send(conn, { t: 'full' }); setTimeout(() => conn.close(), 300); return; } });
-    conn.on('data', m => onHostMsg(conn, m));
+    conn.on('data', m => { try { onHostMsg(conn, m); } catch (e) { } }); // mensagem malformada não derruba o jogo
     conn.on('close', () => hostDrop(conn.peer));
   });
 }
@@ -86,7 +118,7 @@ function hostLobby() {
     <p style="margin:8px 0 4px">Ou mande este link: quem abrir joga no navegador, sem baixar nada, e já cai na sua sala.</p>
     <div style="display:flex;gap:6px;align-items:center"><input id="mp-link" class="search" readonly value="${mpLink()}" style="flex:1;min-width:0;font-size:13px;box-sizing:border-box" onclick="this.select()"><button class="btn sm" data-a="mpcopy">Copiar link</button></div>
     <p class="hint">Quem já tem o jogo clica em Multijogador e digita o código. Dá para entrar com o jogo já começado.</p>
-    <p><b>Na sala (${list.length}/${MP.max}):</b> ${list.join(', ')}</p>
+    <p><b>Na sala (${list.length}/${MP.max}):</b> ${list.map(mpEsc).join(', ')}</p>
     <button class="btn" data-a="mpgo" style="width:100%">Começar</button>`);
   // quem já está na sala de espera vê a lista atualizada e sabe que está tudo certo
   broadcast({ t: 'lobby', code: MP.code, names: list.map(n => n.replace(' (você)', '')) });
@@ -122,21 +154,21 @@ function onHostMsg(conn, m) {
   const id = conn.peer; if (!m || !m.t) return; const p = MP.peers[id]; if (p) p.last = performance.now(); // qualquer mensagem conta como sinal de vida
   switch (m.t) {
     case 'hello': if (!mpCompat(m)) { send(conn, { t: 'bye', why: `Versões incompatíveis: a sala está na ${VERSION} e você na ${m.ver}. Atualizem o jogo para a mesma versão.` }); setTimeout(() => conn.close(), 400); return; }
-      MP.conns[id] = conn; MP.peers[id] = { id, name: (m.name || 'Amigo').slice(0, 16), look: m.look || {}, x: P.x, y: P.y + 40, tx: P.x, ty: P.y + 40, ang: 0, hp: 100, maxhp: 100, last: performance.now() };
+      MP.conns[id] = conn; MP.peers[id] = { id, name: mpName(m.name), look: mpLook(m.look), x: P.x, y: P.y + 40, tx: P.x, ty: P.y + 40, ang: 0, hp: 100, maxhp: 100, last: performance.now() };
       if (G.state === 'title') hostLobby(); else sendWelcome(id); break;
     case 'hb': break;
-    case 'st': if (!p) return; Object.assign(p, { tx: m.x, ty: m.y, ang: m.a, hp: m.hp, maxhp: m.mh, held: m.h, sw: m.sw, down: !!m.dn, crouch: !!m.cr, armor: m.ar, last: performance.now() }); if (p.x === undefined) { p.x = m.x; p.y = m.y; } break;
-    case 'hit': { const e = G.enemies.find(o => o.uid === m.u); if (e && !e.dead) { e.lastHitBy = id; e.lastHitT = G.time; hurtEnemy(e, m.d, m.a, m.k, m.c); if (m.p) e.poison = Math.max(e.poison || 0, 6); } break; }
-    case 'hitA': { const a = G.animals.find(o => o.uid === m.u); if (a && !a.dead) hurtAnimal(a, m.d, m.a); break; }
-    case 'loot': { const o = W.objs[m.o]; if (!o || G.looted[o.id]) { send(conn, { t: 'give', items: [], none: 1 }); break; } hostLoot(conn, o); break; }
-    case 'pick': { const it = G.items.find(i => i.uid === m.u && !i.dead); if (it) { it.dead = true; send(conn, { t: 'give', items: [[it.id, it.n, it.dur]], quiet: 1 }); } break; }
-    case 'drop': dropItem(m.id, m.n, m.x, m.y, m.dur); break;
-    case 'sync': applyDiff(m.d, id); break;
-    case 'fx': hostFx(m, id); broadcast({ t: 'fx2', k: m.k, x: m.x, y: m.y, r: m.r, tt: m.tt }, id); break;
-    case 'chat': { const msg = String(m.msg || '').slice(0, 140); mpChatLine(p ? p.name : '?', msg); broadcast({ t: 'chat', from: p ? p.name : '?', msg }, id); break; }
-    case 'revive': if (m.to === 'host') mpRevived(p ? p.name : 'Um amigo'); else send(MP.conns[m.to], { t: 'revived', by: p ? p.name : 'Um amigo' }); break;
-    case 'tur': { if (typeof TUR !== 'function') break; const T2 = TUR(); T2[m.k] = Math.min(300, (T2[m.k] || 0) + (m.n | 0)); break; }
-    case 'pong': if (p) p.ping = Math.round(performance.now() - m.s); break;
+    case 'st': if (!p) return; Object.assign(p, { tx: mpNum(m.x, 0, WORLD_W, p.tx), ty: mpNum(m.y, 0, WORLD_H, p.ty), ang: mpNum(m.a, -7, 7), hp: mpNum(m.hp, 0, 2000), maxhp: mpNum(m.mh, 1, 2000, 100), held: mpItem(m.h), sw: mpNum(m.sw, 0, 1), down: !!m.dn, crouch: !!m.cr, armor: mpItem(m.ar), last: performance.now() }); if (p.x === undefined) { p.x = p.tx; p.y = p.ty; } break;
+    case 'hit': { if (!p || !mpRate(p, 'hit', 40)) break; const e = G.enemies.find(o => o.uid === m.u); if (e && !e.dead && mpNear(p, e.x, e.y, 950)) { m.d = mpNum(m.d, 0, 500); m.k = mpNum(m.k, 0, 800); m.a = mpNum(m.a, -7, 7); m.c = m.c ? 1 : 0; e.lastHitBy = id; e.lastHitT = G.time; hurtEnemy(e, m.d, m.a, m.k, m.c); if (m.p) e.poison = Math.max(e.poison || 0, 6); } break; }
+    case 'hitA': { if (!p || !mpRate(p, 'hitA', 40)) break; const a = G.animals.find(o => o.uid === m.u); if (a && !a.dead && mpNear(p, a.x, a.y, 950)) hurtAnimal(a, mpNum(m.d, 0, 500), mpNum(m.a, -7, 7)); break; }
+    case 'loot': { const o = W.objs[m.o]; if (!p || !mpRate(p, 'loot', 6) || (o && !mpNear(p, o.x, o.y, 260))) break; if (!o || G.looted[o.id]) { send(conn, { t: 'give', items: [], none: 1 }); break; } hostLoot(conn, o); break; }
+    case 'pick': { if (!p || !mpRate(p, 'pick', 15)) break; const it = G.items.find(i => i.uid === m.u && !i.dead); if (it && mpNear(p, it.x, it.y, 260)) { it.dead = true; send(conn, { t: 'give', items: [[it.id, it.n, it.dur]], quiet: 1 }); } break; }
+    case 'drop': { const iid = mpItem(m.id), x = +m.x, y = +m.y; if (!p || !iid || !mpRate(p, 'drop', 10) || !mpNear(p, x, y, 300)) break; dropItem(iid, Math.round(mpNum(m.n, 1, ITEMS[iid].stack || 99, 1)), x, y, m.dur === undefined ? undefined : mpNum(m.dur, 0, 100000)); break; }
+    case 'sync': { if (!p || !mpRate(p, 'sync', 20)) break; const d = mpCleanDiff(m.d, p); if (d) applyDiff(d, id); break; }
+    case 'fx': { const k = String(m.k), x = +m.x, y = +m.y; if (!p || !/^(fire|acid|flare|lure|smoke|noise)$/.test(k) || !mpRate(p, 'fx', 6) || !mpNear(p, x, y, 900)) break; const f = { t: 'fx', k, x, y, r: m.r === undefined ? undefined : mpNum(m.r, 10, k === 'noise' ? 600 : 200), tt: m.tt === undefined ? undefined : mpNum(m.tt, .5, 90) }; hostFx(f, id); broadcast({ t: 'fx2', k, x, y, r: f.r, tt: f.tt }, id); break; }
+    case 'chat': { if (!p || !mpRate(p, 'chat', 3)) break; const msg = String(m.msg || '').replace(/[\u0000-\u001f]/g, ' ').slice(0, 140); mpChatLine(p ? p.name : '?', msg); broadcast({ t: 'chat', from: p ? p.name : '?', msg }, id); break; }
+    case 'revive': if (!p || !mpRate(p, 'revive', 2)) break; if (m.to === 'host') mpRevived(p ? p.name : 'Um amigo'); else if (Object.prototype.hasOwnProperty.call(MP.conns, m.to)) send(MP.conns[m.to], { t: 'revived', by: p ? p.name : 'Um amigo' }); break;
+    case 'tur': { if (typeof TUR !== 'function') break; if (!p || !/^[a-z0-9_]{1,24}$/.test(String(m.k)) || !mpRate(p, 'tur', 5)) break; const T2 = TUR(); T2[m.k] = Math.min(300, (T2[m.k] || 0) + Math.round(mpNum(m.n, 0, 10))); break; }
+    case 'pong': if (p) p.ping = Math.round(mpNum(performance.now() - m.s, 0, 99999)); break;
   }
 }
 function hostLoot(conn, o) {
@@ -198,7 +230,7 @@ async function mpJoin(code) {
     const to = setTimeout(() => { if (!MP.joined && !conn.open) { mpLeave(); mpLobby('Não deu para conectar na sala ' + code + '. Confira o código, se o anfitrião está com a sala aberta e se a internet de vocês dois está funcionando.'); } }, 20000);
     conn.on('open', () => { clearTimeout(to); mpMsg('Conectado. Falando com o anfitrião...'); send(conn, { t: 'hello', name: MP.name, look: MP.look, ver: VERSION, proto: MP_PROTO }); });
     conn.on('error', () => { if (!MP.joined) { clearTimeout(to); mpLeave(); mpLobby('A conexão com a sala falhou. Tentem de novo; se continuar, um de vocês pode estar numa rede que bloqueia jogos (rede de escola ou de empresa).'); } });
-    conn.on('data', m => onClientMsg(m));
+    conn.on('data', m => { try { onClientMsg(m); } catch (e) { } }); // mensagem malformada não derruba o jogo
     conn.on('close', () => { if (!MP.joined && MP.role === 'client' && MP.conns.host === conn) { mpLeave(); mpLobby('O anfitrião fechou a sala antes de começar.'); return; } if (MP.joined) { toast('A conexão com o anfitrião caiu.', 'u_warn', true); mpCharSave(); setTimeout(() => { mpLeave(); G.state = 'title'; $('hud').hidden = true; $('title').hidden = false; titleCam(); mpLobby('O anfitrião fechou a sala ou a conexão caiu. Seu personagem foi salvo.'); }, 2500); } });
   });
   peer.on('error', err => { if (!MP.joined) mpLobby(err.type === 'peer-unavailable' ? 'Não existe sala com esse código agora.' : 'Erro na conexão: ' + (err.type || err.message)); });
@@ -209,17 +241,17 @@ setInterval(() => { if (isClient() && MP.conns.host && MP.conns.host.open) sendH
 function onClientMsg(m) {
   switch (m.t) {
     case 'full': mpLeave(); return mpLobby('A sala está cheia (4 pessoas).');
-    case 'bye': mpLeave(); return mpLobby(m.why || 'O anfitrião recusou a entrada.');
-    case 'lobby': return mpWaiting(`<p>Você está na sala <b>${m.code}</b>.</p><p><b>Na sala:</b> ${(m.names || []).map(n => String(n).replace(/</g, '&lt;')).join(', ')}</p><p class="hint">Esperando o anfitrião começar a partida. Pode deixar esta tela aberta.</p>`);
+    case 'bye': mpLeave(); return mpLobby(String(m.why || 'O anfitrião recusou a entrada.').slice(0, 200));
+    case 'lobby': return mpWaiting(`<p>Você está na sala <b>${mpEsc(String(m.code || '').slice(0, 5))}</b>.</p><p><b>Na sala:</b> ${(Array.isArray(m.names) ? m.names.slice(0, 4) : []).map(n => mpEsc(mpName(n))).join(', ')}</p><p class="hint">Esperando o anfitrião começar a partida. Pode deixar esta tela aberta.</p>`);
     case 'welcome': return clientStart(m);
     case 'snap': return clientSnap(m);
     case 'sync': return applyDiff(m.d);
     case 'give': { if (m.none) { toast('Alguém já vasculhou aqui.', 'u_x'); return; } let any = false; for (const [id, n, dur] of m.items) if (ITEMS[id]) { if (m.quiet) invAdd(id, n, dur); else give(id, n); any = true; } if (!any && !m.quiet) toast('Nada de útil aqui.', 'u_x'); if (m.loot === 'mala') qev('mala'); if (m.note !== undefined && m.note !== null && !G.notes.includes(m.note)) { G.notes.push(m.note); const n = NOTES[m.note]; if (n) showDialog([['nar', `${n[0]}\n\n“${n[1]}”`]], () => qev('note')); } sfx('pick'); return; }
     case 'hurt': if (!P.dead) { hurtPlayer(m.d, m.a, m.k, m.s); if (m.w) { P.slowT = Math.max(P.slowT || 0, 2.6); } } return;
-    case 'xp': addXP(m.n); G.kills++; G.killsBy[m.k] = (G.killsBy[m.k] || 0) + 1; qev('kill:' + m.k); qev('kill:any'); return;
-    case 'chat': return mpChatLine(m.from, m.msg);
+    case 'xp': if (!Object.prototype.hasOwnProperty.call(ENEMIES, m.k)) return; addXP(Math.round(mpNum(m.n, 0, 2000))); G.kills++; G.killsBy[m.k] = (G.killsBy[m.k] || 0) + 1; qev('kill:' + m.k); qev('kill:any'); return;
+    case 'chat': return mpChatLine(m.from ? mpName(m.from) : '', String(m.msg || '').slice(0, 300));
     case 'left': delete MP.peers[m.id]; return;
-    case 'revived': return mpRevived(m.by);
+    case 'revived': return mpRevived(mpName(m.by));
     case 'fx2': return clientFx(m);
     case 'ping': return sendHost({ t: 'pong', s: m.s });
   }
@@ -241,8 +273,8 @@ function clientStart(m) {
   cam.x = P.x - VW / 2; cam.y = P.y - VH / 2; G.uiDirty = true; toast(`Você entrou na sala ${m.code}.`, 'u_star', true); mpChatLine('', 'Enter abre o chat.');
 }
 function upsertPeer(r) {
-  const [id, name, look, x, y, ang, hp, mh, held, sw, dn, cr, ar] = r; if (id === MP.me) return; let p = MP.peers[id];
-  if (!p) p = MP.peers[id] = { id, x, y }; Object.assign(p, { name, look, tx: x, ty: y, ang, hp, maxhp: mh, held, sw, down: !!dn, crouch: !!cr, armor: ar, last: performance.now() });
+  if (!Array.isArray(r)) return; const [id0, name, look, x0, y0, ang, hp, mh, held, sw, dn, cr, ar] = r, id = String(id0).slice(0, 64); if (id === MP.me || id === '__proto__') return; const x = mpNum(x0, 0, WORLD_W), y = mpNum(y0, 0, WORLD_H); let p = MP.peers[id];
+  if (!p) p = MP.peers[id] = { id, x, y }; Object.assign(p, { name: mpName(name), look: mpLook(look), tx: x, ty: y, ang: mpNum(ang, -7, 7), hp: mpNum(hp, 0, 2000), maxhp: mpNum(mh, 1, 2000, 100), held: mpItem(held), sw: mpNum(sw, 0, 1), down: !!dn, crouch: !!cr, armor: mpItem(ar), last: performance.now() });
 }
 // fotos do mundo que o anfitrião manda 10 vezes por segundo (só o que está perto de você)
 function clientSnap(m) {
@@ -428,8 +460,8 @@ function mpChatLine(from, msg) { MP.chat.push({ from, msg, t: performance.now() 
 function mpUI() {
   if (!inMP()) { if (MPUI.isConnected) MPUI.remove(); return; } const h = document.getElementById('hud'); if (h && !MPUI.isConnected) { h.appendChild(MPUI); h.appendChild(CHATIN); }
   const now = performance.now(), me = { name: P.name, hp: P.hp, maxhp: maxHp(), down: P.downed > 0 };
-  const rows = [me].concat(Object.values(MP.peers)).map(p => { const f = clamp(p.hp / (p.maxhp || 100), 0, 1); return `<div style="display:flex;align-items:center;gap:6px;background:rgba(14,11,17,.7);padding:3px 8px;border-radius:999px;width:max-content"><span style="color:${p.down ? '#ff8a8a' : '#efe2c2'}">${p.name}${p.down ? ' (caído)' : ''}</span><span style="width:46px;height:5px;background:#141018;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;width:${f * 100}%;background:${f < .3 ? '#e05050' : '#6fae72'}"></i></span>${p.ping ? `<small style="color:#948a98">${p.ping}ms</small>` : ''}</div>`; }).join('');
-  const chat = MP.chat.filter(c => now - c.t < 14000 || CHATIN.style.display === 'block').map(c => `<div style="background:rgba(228,216,188,.92);color:#2a2018;padding:3px 9px;border-radius:2px;font:12px 'Special Elite',monospace;max-width:320px">${c.from ? `<b>${c.from}:</b> ` : ''}${String(c.msg).replace(/</g, '&lt;')}</div>`).join('');
+  const rows = [me].concat(Object.values(MP.peers)).map(p => { const f = clamp(p.hp / (p.maxhp || 100), 0, 1); return `<div style="display:flex;align-items:center;gap:6px;background:rgba(14,11,17,.7);padding:3px 8px;border-radius:999px;width:max-content"><span style="color:${p.down ? '#ff8a8a' : '#efe2c2'}">${mpEsc(p.name)}${p.down ? ' (caído)' : ''}</span><span style="width:46px;height:5px;background:#141018;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;width:${f * 100}%;background:${f < .3 ? '#e05050' : '#6fae72'}"></i></span>${p.ping ? `<small style="color:#948a98">${p.ping}ms</small>` : ''}</div>`; }).join('');
+  const chat = MP.chat.filter(c => now - c.t < 14000 || CHATIN.style.display === 'block').map(c => `<div style="background:rgba(228,216,188,.92);color:#2a2018;padding:3px 9px;border-radius:2px;font:12px 'Special Elite',monospace;max-width:320px">${c.from ? `<b>${mpEsc(c.from)}:</b> ` : ''}${mpEsc(c.msg)}</div>`).join('');
   const html = `<div style="font:800 10px Barlow;letter-spacing:.12em;color:#e8c070">SALA ${MP.code}</div>${rows}<div style="height:6px"></div>${chat}`;
   if (MPUI.innerHTML !== html) MPUI.innerHTML = html;
 }
