@@ -1,0 +1,6 @@
+As fontes desta pasta são distribuídas sob a SIL Open Font License, versão 1.1:
+
+- Special Elite, de Astigmatic (AOETI)
+- Barlow, de Jeremy Tribby
+
+Texto da licença: https://openfontlicense.org
